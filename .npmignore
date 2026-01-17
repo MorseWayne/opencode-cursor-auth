@@ -1,0 +1,45 @@
+# Source files
+src/
+tests/
+scripts/
+
+# Config files
+tsconfig.json
+tsconfig.build.json
+bunfig.toml
+bun.lock
+.editorconfig
+.prettierrc
+.eslintrc*
+
+# Git
+.git/
+.gitignore
+
+# GitHub
+.github/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+coverage/
+*.test.ts
+*.spec.ts
+
+# Documentation (keep README)
+docs/
+CONTRIBUTING.md
+SECURITY.md
+CHANGELOG.md
+
+# Development
+*.log
+*.tgz

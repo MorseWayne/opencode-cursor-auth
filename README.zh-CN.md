@@ -15,6 +15,13 @@
 
 一个 OpenCode 插件，支持在 OpenCode 中使用 Cursor 的 AI 后端，具备 OAuth 认证、动态模型发现和完整的工具调用支持。
 
+## 文档
+
+- 🚀 [快速入门](docs/getting-started.md) - 安装和设置指南
+- ⚙️ [配置说明](docs/configuration.md) - 所有配置选项
+- 🔧 [故障排除](docs/troubleshooting.md) - 常见问题与解决方案
+- 🏗️ [架构设计](docs/development/architecture.md) - 技术深度解析
+
 ## 功能特性
 
 - **OpenCode 插件**：通过 OAuth 认证实现与 OpenCode 的原生集成

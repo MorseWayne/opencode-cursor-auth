@@ -13,7 +13,14 @@
 >
 > By using this project, you acknowledge these risks and accept full responsibility. For educational and research purposes only.
 
-An OpenCode plugin that lets you use Cursor’s AI backend with **OAuth authentication**, **dynamic model discovery**, and **full tool-calling support**.
+An OpenCode plugin that lets you use Cursor's AI backend with **OAuth authentication**, **dynamic model discovery**, and **full tool-calling support**.
+
+## Documentation
+
+- 🚀 [Getting Started](docs/getting-started.md) - Installation and setup guide
+- ⚙️ [Configuration](docs/configuration.md) - All configuration options
+- 🔧 [Troubleshooting](docs/troubleshooting.md) - Common issues and solutions
+- 🏗️ [Architecture](docs/development/architecture.md) - Technical deep dive
 
 ## Features
 
