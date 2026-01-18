@@ -24,6 +24,7 @@ import type {
 import {
   generateCompletionId,
   messagesToPrompt,
+  messagesToPromptWithImages,
   mapExecRequestToTool,
   createErrorResponse,
   createSSEChunk,
@@ -32,8 +33,19 @@ import {
   handleCORS,
   createStreamChunk,
   generateToolCallId,
+  hasMultimodalContent,
 } from "./utils";
-import { resolveModel, getModelOwner } from "../utils/model-resolver";
+import {
+  resolveModel,
+  getModelOwner,
+  supportsVision,
+  getModelConfig,
+} from "../utils/model-resolver";
+import {
+  transformMessages,
+  validateMessagesForModel,
+  type ExtendedMessage,
+} from "../utils/request-transformer";
 import { calculateTokenUsage } from "../utils/tokenizer";
 import type { CursorModelInfo } from "../api/cursor-models";
 import {
@@ -45,8 +57,14 @@ import {
   selectCallBase,
   type SessionLike,
 } from "../session-reuse";
-import { config, isSessionReuseEnabled } from "../config";
-import { openaiLogger as logger, LRUCache } from "../utils";
+import { config, isSessionReuseEnabled, shouldLogFilteredIds } from "../config";
+import {
+  openaiLogger as logger,
+  LRUCache,
+  logRequestTransform,
+  logRequest,
+  logMultimodalContent,
+} from "../utils";
 
 // --- Model Cache ---
 const modelCache = new LRUCache<CursorModelInfo[]>({
@@ -178,16 +196,75 @@ async function handleChatCompletions(
     model = body.model ?? "default";
   }
 
-  const prompt = messagesToPrompt(body.messages);
+  // Get model configuration
+  const modelConfig = getModelConfig(model);
+  const modelSupportsVision = supportsVision(model);
+
+  // Transform messages: filter item_reference, strip IDs
+  const transformResult = transformMessages(
+    body.messages as ExtendedMessage[],
+    { logStats: shouldLogFilteredIds() }
+  );
+  const transformedMessages = transformResult.messages;
+
+  // Log transformation statistics if enabled
+  if (transformResult.stats.itemReferencesFiltered > 0 || transformResult.stats.idsStripped > 0) {
+    logRequestTransform(transformResult.stats);
+  }
+
+  // Validate messages for model capabilities (check for images with non-vision models)
+  const validation = validateMessagesForModel(transformedMessages, modelSupportsVision);
+  if (!validation.valid) {
+    for (const warning of validation.warnings) {
+      log(`[OpenAI Compat] Warning: ${warning}`);
+    }
+  }
+
+  // Log multimodal content detection
+  transformedMessages.forEach((msg, i) => {
+    if (msg && hasMultimodalContent(msg.content)) {
+      const content = msg.content;
+      const imageCount = Array.isArray(content)
+        ? content.filter((p) => p.type === "image_url").length
+        : 0;
+      const hasBase64 = Array.isArray(content)
+        ? content.some(
+            (p) => p.type === "image_url" && (p as { image_url: { url: string } }).image_url.url.startsWith("data:")
+          )
+        : false;
+      logMultimodalContent({
+        messageIndex: i,
+        imageCount,
+        hasBase64,
+        modelSupportsVision,
+      });
+    }
+  });
+
+  // Convert messages to prompt with multimodal handling
+  const promptResult = messagesToPromptWithImages(transformedMessages, {
+    supportsVision: modelSupportsVision,
+    includeImageReferences: true,
+  });
+  const prompt = promptResult.prompt;
+
+  // Log request details
   const stream = body.stream ?? false;
   const tools = body.tools as OpenAIToolDefinition[] | undefined;
   const toolsProvided = tools && tools.length > 0;
 
+  logRequest("POST", "/v1/chat/completions", {
+    model,
+    messageCount: transformedMessages.length,
+    hasTools: toolsProvided,
+    stream,
+  });
+
   // Log tool call status for debugging
-  const toolCallCount = (body.messages as OpenAIMessage[])
+  const toolCallCount = (transformedMessages as OpenAIMessage[])
     .filter(m => m.role === "assistant" && m.tool_calls)
     .reduce((acc, m) => acc + (m.tool_calls?.length ?? 0), 0);
-  const toolResultCount = (body.messages as OpenAIMessage[])
+  const toolResultCount = (transformedMessages as OpenAIMessage[])
     .filter(m => m.role === "tool").length;
 
   if (toolCallCount > 0) {
@@ -205,7 +282,7 @@ async function handleChatCompletions(
       model,
       tools,
       toolsProvided: toolsProvided ?? false,
-      messages: body.messages,
+      messages: transformedMessages,
       completionId,
       created,
       log,

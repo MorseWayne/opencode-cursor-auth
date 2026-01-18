@@ -199,6 +199,123 @@ export const openaiLogger = createLogger("openai-compat");
  */
 export const sessionLogger = createLogger("session");
 
+/**
+ * Logger for request transformation
+ */
+export const transformLogger = createLogger("transform");
+
+// --- Request Transformation Logging ---
+
+export interface TransformLogData {
+  originalCount: number;
+  filteredCount: number;
+  itemReferencesFiltered: number;
+  idsStripped: number;
+  strippedIds?: string[];
+}
+
+/**
+ * Log request transformation statistics
+ * Only logs when CURSOR_LOG_FILTERED_IDS or CURSOR_DEBUG is enabled
+ */
+export function logRequestTransform(data: TransformLogData): void {
+  if (!config.debug.logFilteredIds && !config.debug.enabled) return;
+
+  const removed = data.originalCount - data.filteredCount;
+
+  if (removed > 0 || data.idsStripped > 0) {
+    transformLogger.debug(
+      `Processed ${data.originalCount} messages: ` +
+        `filtered ${data.itemReferencesFiltered} item_reference(s), ` +
+        `stripped ${data.idsStripped} ID(s)`,
+      {
+        originalCount: data.originalCount,
+        filteredCount: data.filteredCount,
+        itemReferencesFiltered: data.itemReferencesFiltered,
+        idsStripped: data.idsStripped,
+      }
+    );
+
+    if (data.strippedIds && data.strippedIds.length > 0) {
+      const displayIds =
+        data.strippedIds.length <= 10
+          ? data.strippedIds
+          : [...data.strippedIds.slice(0, 10), `... and ${data.strippedIds.length - 10} more`];
+      transformLogger.debug(`Stripped IDs: ${displayIds.join(", ")}`);
+    }
+  }
+}
+
+// --- Multimodal Content Logging ---
+
+export interface MultimodalLogData {
+  messageIndex: number;
+  imageCount: number;
+  hasBase64: boolean;
+  modelSupportsVision: boolean;
+}
+
+/**
+ * Log multimodal content detection
+ * Only logs when CURSOR_LOG_MULTIMODAL or CURSOR_DEBUG is enabled
+ */
+export function logMultimodalContent(data: MultimodalLogData): void {
+  if (!config.debug.logMultimodal && !config.debug.enabled) return;
+
+  transformLogger.debug(
+    `Message ${data.messageIndex + 1} contains ${data.imageCount} image(s)`,
+    {
+      hasBase64: data.hasBase64,
+      modelSupportsVision: data.modelSupportsVision,
+    }
+  );
+
+  if (!data.modelSupportsVision) {
+    transformLogger.warn(
+      `Images in message ${data.messageIndex + 1} will be ignored (model does not support vision)`
+    );
+  }
+}
+
+// --- Request/Response Logging ---
+
+/**
+ * Log incoming request details
+ * Only logs when CURSOR_REQUEST_LOGGING or CURSOR_DEBUG is enabled
+ */
+export function logRequest(
+  method: string,
+  path: string,
+  body?: {
+    model?: string;
+    messageCount?: number;
+    hasTools?: boolean;
+    stream?: boolean;
+  }
+): void {
+  if (!config.debug.requestLogging && !config.debug.enabled) return;
+
+  openaiLogger.debug(`${method} ${path}`, body ? { ...body } : undefined);
+}
+
+/**
+ * Log response details
+ * Only logs when CURSOR_REQUEST_LOGGING or CURSOR_DEBUG is enabled
+ */
+export function logResponse(
+  status: number,
+  durationMs: number,
+  details?: {
+    model?: string;
+    finishReason?: string;
+    tokenUsage?: { prompt: number; completion: number; total: number };
+  }
+): void {
+  if (!config.debug.requestLogging && !config.debug.enabled) return;
+
+  openaiLogger.debug(`Response ${status} (${durationMs}ms)`, details ? { ...details } : undefined);
+}
+
 // --- Timing Utilities ---
 
 /**

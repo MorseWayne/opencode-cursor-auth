@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { messagesToPrompt } from "../../src/lib/openai-compat/utils";
+import { messagesToPrompt, messagesToPromptWithImages } from "../../src/lib/openai-compat/utils";
 import type { OpenAIMessage } from "../../src/lib/openai-compat/types";
 
 describe("messagesToPrompt", () => {
@@ -19,7 +19,7 @@ describe("messagesToPrompt", () => {
     expect(result).toBe("User: ");
   });
 
-  test("handles array content with text parts", () => {
+  test("handles array content with text parts (vision model)", () => {
     const messages: OpenAIMessage[] = [
       {
         role: "user",
@@ -29,11 +29,29 @@ describe("messagesToPrompt", () => {
         ],
       },
     ];
-    const result = messagesToPrompt(messages);
+    // When vision is supported, no image references are added
+    const result = messagesToPrompt(messages, { supportsVision: true });
     expect(result).toBe("User: What is in this image?");
   });
 
-  test("handles array content with multiple text parts", () => {
+  test("handles array content with text parts (non-vision model)", () => {
+    const messages: OpenAIMessage[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "What is in this image?" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,..." } },
+        ],
+      },
+    ];
+    // When vision is not supported, image references are added
+    const result = messagesToPrompt(messages, { supportsVision: false });
+    expect(result).toContain("User: What is in this image?");
+    expect(result).toContain("Image 1:");
+    expect(result).toContain("embedded image/png");
+  });
+
+  test("handles array content with multiple text parts (vision model)", () => {
     const messages: OpenAIMessage[] = [
       {
         role: "user",
@@ -44,7 +62,7 @@ describe("messagesToPrompt", () => {
         ],
       },
     ];
-    const result = messagesToPrompt(messages);
+    const result = messagesToPrompt(messages, { supportsVision: true });
     expect(result).toBe("User: First part\nSecond part");
   });
 
@@ -57,7 +75,8 @@ describe("messagesToPrompt", () => {
         ],
       },
     ];
-    const result = messagesToPrompt(messages);
+    // Vision model: no image references added
+    const result = messagesToPrompt(messages, { supportsVision: true });
     expect(result).toBe("User: ");
   });
 

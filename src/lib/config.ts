@@ -37,6 +37,14 @@ export const config = {
     timing: envBool("CURSOR_TIMING", false),
     /** Log level: error, warn, info, debug */
     level: envString("CURSOR_LOG_LEVEL", "info") as "error" | "warn" | "info" | "debug",
+    /** Enable request/response logging for debugging */
+    requestLogging: envBool("CURSOR_REQUEST_LOGGING", false),
+    /** Log filtered IDs and item_references during request transformation */
+    logFilteredIds: envBool("CURSOR_LOG_FILTERED_IDS", false),
+    /** Log multimodal content detection */
+    logMultimodal: envBool("CURSOR_LOG_MULTIMODAL", false),
+    /** Output logs in JSON format */
+    jsonFormat: envBool("CURSOR_LOG_JSON", false),
   },
 
   /**
@@ -173,4 +181,32 @@ export function isSessionReuseEnabled(): boolean {
 export function getLogLevel(): "error" | "warn" | "info" | "debug" {
   if (config.debug.enabled) return "debug";
   return config.debug.level;
+}
+
+/**
+ * Check if request logging is enabled
+ */
+export function isRequestLoggingEnabled(): boolean {
+  return config.debug.requestLogging || config.debug.enabled;
+}
+
+/**
+ * Check if filtered IDs should be logged
+ */
+export function shouldLogFilteredIds(): boolean {
+  return config.debug.logFilteredIds || config.debug.enabled;
+}
+
+/**
+ * Check if multimodal content should be logged
+ */
+export function shouldLogMultimodal(): boolean {
+  return config.debug.logMultimodal || config.debug.enabled;
+}
+
+/**
+ * Check if JSON log format is enabled
+ */
+export function isJsonLogFormat(): boolean {
+  return config.debug.jsonFormat;
 }

@@ -103,6 +103,9 @@ Default listen address: `http://localhost:18741`
 | `CURSOR_TIMING` | Enable performance timing logs | `0` |
 | `CURSOR_LOG_LEVEL` | Log level: `error`, `warn`, `info`, `debug` | `info` |
 | `CURSOR_LOG_JSON` | Output logs in JSON format | `0` |
+| `CURSOR_REQUEST_LOGGING` | Enable request/response logging | `0` |
+| `CURSOR_LOG_FILTERED_IDS` | Log filtered message IDs | `0` |
+| `CURSOR_LOG_MULTIMODAL` | Log multimodal content detection | `0` |
 
 #### Session & Cache
 

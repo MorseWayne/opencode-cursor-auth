@@ -6,7 +6,13 @@
 
 import { randomUUID } from "node:crypto";
 import type { ExecRequest } from "../api/agent-service";
-import type { OpenAIMessage, OpenAIMessageContent, OpenAIStreamChunk } from "./types";
+import type {
+  OpenAIMessage,
+  OpenAIMessageContent,
+  OpenAIStreamChunk,
+  OpenAITextContentPart,
+  OpenAIImageContentPart,
+} from "./types";
 
 /**
  * Generate a unique completion ID
@@ -15,6 +21,92 @@ export function generateCompletionId(): string {
   return `chatcmpl-${randomUUID().replace(/-/g, "").slice(0, 24)}`;
 }
 
+// --- Multimodal Content Processing ---
+
+/**
+ * Result of processing multimodal content
+ */
+export interface MultimodalContentResult {
+  /** Combined text content */
+  text: string;
+  /** Extracted image content */
+  images: Array<{
+    url: string;
+    detail?: "auto" | "low" | "high";
+    /** Whether the URL is a base64 data URL */
+    isBase64: boolean;
+    /** Detected MIME type (if base64) */
+    mimeType?: string;
+  }>;
+  /** Whether the content contains images */
+  hasImages: boolean;
+}
+
+/**
+ * Check if content contains multimodal (image) parts
+ */
+export function hasMultimodalContent(content: OpenAIMessageContent): boolean {
+  if (content === null || typeof content === "string") {
+    return false;
+  }
+  return content.some((part) => part.type === "image_url");
+}
+
+/**
+ * Process multimodal content into separate text and image parts
+ *
+ * Handles:
+ * - Plain string content
+ * - Array of text/image parts
+ * - Base64 data URLs
+ * - Regular image URLs
+ */
+export function processMultimodalContent(content: OpenAIMessageContent): MultimodalContentResult {
+  if (content === null) {
+    return { text: "", images: [], hasImages: false };
+  }
+
+  if (typeof content === "string") {
+    return { text: content, images: [], hasImages: false };
+  }
+
+  const texts: string[] = [];
+  const images: MultimodalContentResult["images"] = [];
+
+  for (const part of content) {
+    if (part.type === "text") {
+      texts.push((part as OpenAITextContentPart).text);
+    } else if (part.type === "image_url") {
+      const imagePart = part as OpenAIImageContentPart;
+      const url = imagePart.image_url.url;
+      const isBase64 = url.startsWith("data:");
+
+      let mimeType: string | undefined;
+      if (isBase64) {
+        // Extract MIME type from data URL: data:image/png;base64,...
+        const match = url.match(/^data:([^;]+);/);
+        mimeType = match?.[1];
+      }
+
+      images.push({
+        url,
+        detail: imagePart.image_url.detail,
+        isBase64,
+        mimeType,
+      });
+    }
+  }
+
+  return {
+    text: texts.join("\n"),
+    images,
+    hasImages: images.length > 0,
+  };
+}
+
+/**
+ * Extract only text content from potentially multimodal content
+ */
 function extractTextContent(content: OpenAIMessageContent): string {
   if (content === null) return "";
   if (typeof content === "string") return content;
@@ -26,18 +118,80 @@ function extractTextContent(content: OpenAIMessageContent): string {
 }
 
 /**
+ * Format image references for text-based prompts
+ * When images can't be directly passed, include a description
+ */
+export function formatImageReferences(images: MultimodalContentResult["images"]): string {
+  if (images.length === 0) return "";
+
+  const refs = images.map((img, i) => {
+    const source = img.isBase64
+      ? `[embedded ${img.mimeType || "image"}]`
+      : `[image: ${img.url}]`;
+    const detail = img.detail ? ` (detail: ${img.detail})` : "";
+    return `Image ${i + 1}: ${source}${detail}`;
+  });
+
+  return refs.join("\n");
+}
+
+/**
+ * Options for message to prompt conversion
+ */
+export interface MessagesToPromptOptions {
+  /** Whether the model supports vision/images */
+  supportsVision?: boolean;
+  /** Whether to include image references in text when vision not supported */
+  includeImageReferences?: boolean;
+}
+
+/**
+ * Result of message to prompt conversion
+ */
+export interface MessagesToPromptResult {
+  /** The formatted prompt text */
+  prompt: string;
+  /** Extracted images from all messages */
+  images: MultimodalContentResult["images"];
+  /** Whether the conversation contains images */
+  hasImages: boolean;
+}
+
+/**
  * Convert OpenAI messages array to a prompt string for Cursor.
  * Handles the full message history including:
  * - system messages (prepended)
- * - user messages
+ * - user messages (with optional multimodal content)
  * - assistant messages (including those with tool_calls)
  * - tool result messages (role: "tool")
  * 
  * For multi-turn conversations with tool calls, this formats the conversation
  * so the model can see what tools were called and their results.
+ *
+ * For multimodal content:
+ * - Extracts text content for the prompt
+ * - Collects images separately for models that support vision
+ * - Optionally adds image references for non-vision models
  */
-export function messagesToPrompt(messages: OpenAIMessage[]): string {
+export function messagesToPrompt(
+  messages: OpenAIMessage[],
+  options: MessagesToPromptOptions = {}
+): string {
+  const result = messagesToPromptWithImages(messages, options);
+  return result.prompt;
+}
+
+/**
+ * Convert OpenAI messages to prompt with image extraction
+ * Returns both the prompt and any extracted images for vision models
+ */
+export function messagesToPromptWithImages(
+  messages: OpenAIMessage[],
+  options: MessagesToPromptOptions = {}
+): MessagesToPromptResult {
+  const { supportsVision = false, includeImageReferences = true } = options;
   const parts: string[] = [];
+  const allImages: MultimodalContentResult["images"] = [];
   
   // Extract system messages to prepend
   const systemMessages = messages.filter(m => m.role === "system");
@@ -54,7 +208,24 @@ export function messagesToPrompt(messages: OpenAIMessage[]): string {
   // Format the full conversation history
   for (const msg of conversationMessages) {
     if (msg.role === "user") {
-      parts.push(`User: ${extractTextContent(msg.content)}`);
+      // Process potentially multimodal user messages
+      const multimodal = processMultimodalContent(msg.content);
+      let userContent = multimodal.text;
+
+      if (multimodal.hasImages) {
+        // Collect images for vision-capable models
+        allImages.push(...multimodal.images);
+
+        // Add image references for non-vision models or as context
+        if (!supportsVision && includeImageReferences) {
+          const imageRefs = formatImageReferences(multimodal.images);
+          if (imageRefs) {
+            userContent = `${userContent}\n${imageRefs}`;
+          }
+        }
+      }
+
+      parts.push(`User: ${userContent}`);
     } else if (msg.role === "assistant") {
       if (msg.tool_calls && msg.tool_calls.length > 0) {
         // Assistant made tool calls - show what was called
@@ -84,7 +255,11 @@ export function messagesToPrompt(messages: OpenAIMessage[]): string {
     parts.push("\nBased on the tool results above, please continue your response:");
   }
   
-  return parts.join("\n\n");
+  return {
+    prompt: parts.join("\n\n"),
+    images: allImages,
+    hasImages: allImages.length > 0,
+  };
 }
 
 /**

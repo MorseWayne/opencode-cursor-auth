@@ -24,3 +24,6 @@ export * from "./model-resolver";
 
 // Request pool utilities
 export * from "./request-pool";
+
+// Request transformer utilities
+export * from "./request-transformer";
