@@ -30,10 +30,10 @@ import {
   createSSEDone,
   makeStreamResponse,
   handleCORS,
-  getModelOwner,
   createStreamChunk,
   generateToolCallId,
 } from "./utils";
+import { resolveModel, getModelOwner } from "../utils/model-resolver";
 import { calculateTokenUsage } from "../utils/tokenizer";
 import type { CursorModelInfo } from "../api/cursor-models";
 import {
@@ -83,32 +83,6 @@ async function getCachedModels(accessToken: string): Promise<CursorModelInfo[]> 
   return models;
 }
 
-/**
- * Resolve a requested model name to its internal model ID
- * Maps displayModelId/aliases to the actual modelId used by the agent service
- */
-function resolveModel(requestedModel: string, models: CursorModelInfo[]): string {
-  // Direct match on modelId
-  const directMatch = models.find(m => m.modelId === requestedModel);
-  if (directMatch) {
-    return directMatch.modelId;
-  }
-
-  // Match on displayModelId
-  const displayMatch = models.find(m => m.displayModelId === requestedModel);
-  if (displayMatch) {
-    return displayMatch.modelId;
-  }
-
-  // Match on aliases
-  const aliasMatch = models.find(m => m.aliases.includes(requestedModel));
-  if (aliasMatch) {
-    return aliasMatch.modelId;
-  }
-
-  // No match found, return as-is (let Cursor API handle it)
-  return requestedModel;
-}
 
 /**
  * Options for the request handler

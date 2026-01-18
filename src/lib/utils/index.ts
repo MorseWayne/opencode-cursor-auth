@@ -18,3 +18,9 @@ export * from "./fetch";
 
 // Cache utilities
 export * from "./cache";
+
+// Model resolver utilities
+export * from "./model-resolver";
+
+// Request pool utilities
+export * from "./request-pool";
