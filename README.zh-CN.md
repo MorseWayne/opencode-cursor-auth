@@ -38,7 +38,7 @@
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-cursor-proxy@latest"],
+  "plugin": ["opencode-cursor-proxy@1.0.2"],
   "provider": {
     "cursor": { "name": "Cursor" }
   }
@@ -59,6 +59,9 @@ opencode auth login
 2. 输入 **"cursor"** 作为提供商名称
 3. 选择 **"OAuth with Cursor"**
 4. 完成基于浏览器的 OAuth 流程
+5. 使用opencode models 查看当前支持的模型是否包含cursor, 你将会看到如下输出：
+
+    ![models](./resource/screen_shot/models.png)
 
 ## 开发：独立代理服务器（可选）
 

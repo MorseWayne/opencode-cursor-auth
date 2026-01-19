@@ -38,7 +38,7 @@ Add the plugin and provider to your `opencode.json`:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-cursor-proxy@latest"],
+  "plugin": ["opencode-cursor-proxy@v1.0.2"],
   "provider": {
     "cursor": { "name": "Cursor" }
   }
@@ -59,6 +59,9 @@ Then:
 2. Enter **"cursor"** as the provider name
 3. Select **"OAuth with Cursor"**
 4. Complete the browser-based OAuth flow
+5. Use `opencode models` to verify that the cursor provider is available. You should see output similar to:
+
+    ![models](./resource/screen_shot/models.png)
 
 ## Standalone proxy server (optional, for development)
 

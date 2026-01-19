@@ -1,6 +1,6 @@
 {
   "name": "opencode-cursor-proxy",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "OpenCode plugin for Cursor's AI backend",
   "author": "Morse Wayne",
   "license": "MIT",
