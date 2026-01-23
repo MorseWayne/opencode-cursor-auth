@@ -92,15 +92,22 @@ export class RequestPool {
 
     this.activeCount++;
 
+    // Use AbortController pattern to properly clean up the timeout
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
     try {
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => {
+        timeoutId = setTimeout(() => {
           reject(new Error(`Request timed out after ${this.requestTimeoutMs}ms`));
         }, this.requestTimeoutMs);
       });
 
       return await Promise.race([fn(), timeoutPromise]);
     } finally {
+      // Always clear the timeout to prevent timer leaks
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
       this.activeCount--;
       const next = this.queue.shift();
       if (next) {

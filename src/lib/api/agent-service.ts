@@ -238,11 +238,16 @@ function buildExecClientMessage(
   return buildExecClientMessageWithMcpResult(id, execId, result);
 }
 
+/** Maximum number of blobs to keep in memory per client instance */
+const MAX_BLOB_STORE_SIZE = config.cache.maxBlobs;
+
 export class AgentServiceClient {
   private baseUrl: string;
   private accessToken: string;
   private workspacePath: string;
+  /** Bounded blob store to prevent unbounded memory growth */
   private blobStore: Map<string, Uint8Array>;
+  private blobStoreOrder: string[] = []; // Track insertion order for LRU eviction
   private privacyMode = true;
   private clientVersionHeader = "cli-unknown";
   private baseUrlAttempts: string[] | null = null;
@@ -264,6 +269,7 @@ export class AgentServiceClient {
     this.baseUrl = options.baseUrl ?? CURSOR_API_URL;
     this.workspacePath = options.workspacePath ?? process.cwd();
     this.blobStore = new Map();
+    this.blobStoreOrder = [];
 
     debugLog(
       `[DEBUG] AgentServiceClient using baseUrl: ${this.baseUrl}, privacyMode=${this.privacyMode}, clientVersion=${this.clientVersionHeader}`
@@ -328,6 +334,38 @@ export class AgentServiceClient {
 
   private blobIdToKey(blobId: Uint8Array): string {
     return Buffer.from(blobId).toString('hex');
+  }
+
+  /**
+   * Store a blob with LRU eviction when the store is full
+   */
+  private storeBlob(key: string, data: Uint8Array): void {
+    // If key already exists, remove from order tracking
+    const existingIndex = this.blobStoreOrder.indexOf(key);
+    if (existingIndex !== -1) {
+      this.blobStoreOrder.splice(existingIndex, 1);
+    }
+
+    // Evict oldest entries if at capacity
+    while (this.blobStore.size >= MAX_BLOB_STORE_SIZE && this.blobStoreOrder.length > 0) {
+      const oldestKey = this.blobStoreOrder.shift();
+      if (oldestKey) {
+        this.blobStore.delete(oldestKey);
+        debugLog(`[KV-BLOB] Evicted oldest blob: ${oldestKey.slice(0, 16)}...`);
+      }
+    }
+
+    // Store new blob
+    this.blobStore.set(key, data);
+    this.blobStoreOrder.push(key);
+  }
+
+  /**
+   * Clear all blobs (called at the start of a new request to prevent cross-request leakage)
+   */
+  private clearBlobStore(): void {
+    this.blobStore.clear();
+    this.blobStoreOrder = [];
   }
 
   /**
@@ -456,7 +494,7 @@ export class AgentServiceClient {
 
     if (kvMsg.messageType === 'set_blob_args' && kvMsg.blobId && kvMsg.blobData) {
       const key = this.blobIdToKey(kvMsg.blobId);
-      this.blobStore.set(key, kvMsg.blobData);
+      this.storeBlob(key, kvMsg.blobData);
 
       const blobAnalysis = analyzeBlobData(kvMsg.blobData);
       debugLog(`[KV-BLOB] SET id=${kvMsg.id}, key=${key.slice(0, 16)}..., size=${kvMsg.blobData.length}b, type=${blobAnalysis.type}`);
@@ -794,6 +832,9 @@ export class AgentServiceClient {
     const metrics = createTimingMetrics();
     const requestId = randomUUID();
 
+    // Clear blob store at the start of each request to prevent cross-request memory leakage
+    this.clearBlobStore();
+
     const messageBody = this.buildChatMessage(request);
     metrics.messageBuildMs = Date.now() - metrics.requestStart;
 
@@ -873,6 +914,9 @@ export class AgentServiceClient {
           const { done, value } = await reader.read();
 
           if (done) {
+            // Abort the connection to ensure proper cleanup
+            controller.abort();
+            logTimingMetrics(metrics);
             yield { type: "done" };
             break;
           }
@@ -1229,10 +1273,14 @@ export class AgentServiceClient {
       } finally {
         reader.releaseLock();
         clearTimeout(timeout);
+        // Ensure connection is aborted to prevent leaks
+        controller.abort();
         this.currentRequestId = null;
       }
     } catch (err: unknown) {
       clearTimeout(timeout);
+      // Ensure connection is aborted on error
+      controller.abort();
       this.currentRequestId = null;
       const error = err as Error & { name?: string };
       if (error.name === 'AbortError') {

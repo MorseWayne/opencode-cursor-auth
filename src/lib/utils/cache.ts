@@ -15,8 +15,8 @@ export interface LRUCacheOptions<V> {
   max: number;
   /** Time-to-live in milliseconds (0 = no expiration) */
   ttl?: number;
-  /** Callback when an item is evicted */
-  onEvict?: (key: string, value: V) => void;
+  /** Callback when an item is evicted (can be sync or async) */
+  onEvict?: (key: string, value: V) => void | Promise<void>;
 }
 
 interface CacheEntry<V> {
@@ -48,7 +48,9 @@ export class LRUCache<V> {
   private cache: Map<string, CacheEntry<V>>;
   private max: number;
   private ttl: number;
-  private onEvict?: (key: string, value: V) => void;
+  private onEvict?: (key: string, value: V) => void | Promise<void>;
+  /** Track pending async cleanup operations to avoid dangling promises */
+  private pendingCleanups: Set<Promise<void>> = new Set();
 
   constructor(options: LRUCacheOptions<V>) {
     this.cache = new Map();
@@ -124,24 +126,74 @@ export class LRUCache<V> {
   }
 
   /**
-   * Delete an item from the cache
+   * Delete an item from the cache (sync version)
+   * Note: If onEvict is async, it will be scheduled but not awaited
    */
   delete(key: string): boolean {
     const entry = this.cache.get(key);
     if (entry && this.onEvict) {
-      this.onEvict(key, entry.value);
+      const result = this.onEvict(key, entry.value);
+      // Track async cleanup to prevent dangling promises
+      if (result instanceof Promise) {
+        this.pendingCleanups.add(result);
+        result.finally(() => this.pendingCleanups.delete(result));
+      }
     }
     return this.cache.delete(key);
   }
 
   /**
-   * Clear all items from the cache
+   * Delete an item from the cache (async version)
+   * Awaits the onEvict callback if it returns a promise
+   */
+  async deleteAsync(key: string): Promise<boolean> {
+    const entry = this.cache.get(key);
+    if (entry && this.onEvict) {
+      await this.onEvict(key, entry.value);
+    }
+    return this.cache.delete(key);
+  }
+
+  /**
+   * Wait for all pending async cleanup operations to complete
+   */
+  async waitForCleanups(): Promise<void> {
+    if (this.pendingCleanups.size > 0) {
+      await Promise.allSettled(this.pendingCleanups);
+    }
+  }
+
+  /**
+   * Clear all items from the cache (sync version)
+   * Note: If onEvict is async, cleanups will be scheduled but not awaited
    */
   clear(): void {
     if (this.onEvict) {
       for (const [key, entry] of this.cache) {
-        this.onEvict(key, entry.value);
+        const result = this.onEvict(key, entry.value);
+        if (result instanceof Promise) {
+          this.pendingCleanups.add(result);
+          result.finally(() => this.pendingCleanups.delete(result));
+        }
       }
+    }
+    this.cache.clear();
+  }
+
+  /**
+   * Clear all items from the cache (async version)
+   * Awaits all onEvict callbacks
+   */
+  async clearAsync(): Promise<void> {
+    if (this.onEvict) {
+      const cleanups: Promise<void>[] = [];
+      for (const [key, entry] of this.cache) {
+        const result = this.onEvict(key, entry.value);
+        if (result instanceof Promise) {
+          cleanups.push(result);
+        }
+      }
+      await Promise.allSettled(cleanups);
     }
     this.cache.clear();
   }

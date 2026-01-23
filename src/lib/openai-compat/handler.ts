@@ -842,6 +842,15 @@ async function streamChatCompletionWithSessionReuse(params: StreamParams): Promi
         controller.enqueue(encoder.encode(createSSEDone()));
         controller.close();
       } catch (err: unknown) {
+        // Clean up session on error to prevent connection leaks
+        log(`[Session ${sessionId}] Error occurred, cleaning up session`);
+        try {
+          await activeSession.iterator.return?.();
+        } catch {
+          // Ignore cleanup errors
+        }
+        sessionMap.delete(sessionId);
+
         if (!isClosed) {
           try {
             controller.error(err);
@@ -851,8 +860,16 @@ async function streamChatCompletionWithSessionReuse(params: StreamParams): Promi
         }
       }
     },
-    cancel() {
+    async cancel() {
       isClosed = true;
+      // Clean up session when stream is cancelled (e.g., client disconnects)
+      log(`[Session ${sessionId}] Stream cancelled, cleaning up session`);
+      try {
+        await activeSession.iterator.return?.();
+      } catch {
+        // Ignore cleanup errors
+      }
+      sessionMap.delete(sessionId);
     },
   });
 
