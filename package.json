@@ -38,6 +38,9 @@
     "auth:login": "bun run scripts/auth.ts login",
     "auth:logout": "bun run scripts/auth.ts logout",
     "models": "bun run scripts/fetch-models.ts",
+    "sniffer": "bun run scripts/cursor-sniffer.ts",
+    "sniffer:verbose": "bun run scripts/cursor-sniffer.ts --verbose",
+    "sniffer:interactive": "bun run scripts/cursor-sniffer.ts --interactive",
     "test": "bun test tests/unit",
     "test:integration": "bun test tests/integration",
     "test:all": "bun test tests"
