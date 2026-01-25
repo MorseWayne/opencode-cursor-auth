@@ -13,6 +13,15 @@ Usage:
     
     # Save to file
     mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set cursor_output=traffic.log
+    
+    # Filter modes (default: smart)
+    mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set cursor_filter=smart
+    
+    Filter modes:
+      - smart: Hide background noise (repo sync, telemetry) - RECOMMENDED
+      - ai:    Only show AI-related requests (models, chat, agent)
+      - all:   Show everything (very verbose)
+      - quiet: Only count requests, no details
 
 Then configure Cursor to use the proxy:
     export HTTP_PROXY=http://127.0.0.1:8080
@@ -28,11 +37,40 @@ import subprocess
 import base64
 import json
 import os
+import re
 import sys
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Set
 from mitmproxy import ctx, http
 from mitmproxy.addonmanager import Loader
+
+
+# Endpoint patterns to filter
+NOISE_ENDPOINTS = {
+    # Repository sync (very frequent)
+    "SyncMerkleSubtreeV2",
+    "FastUpdateFileV2",
+    "FastRepoInitHandshakeV2",
+    "FastRepoSyncComplete",
+    # Telemetry
+    "v1/traces",
+    # Dashboard/settings (initialization)
+    "GetTeamHooks",
+    "GetTeamAdminSettingsOrEmptyIfNotInTeam",
+    "GetUserPrivacyMode",
+    "GetTeamCommands",
+    "GetCliDownloadUrl",
+}
+
+# AI-related endpoints (always interesting)
+AI_ENDPOINTS = {
+    "GetUsableModels",
+    "GetDefaultModelForCli",
+    "NameAgent",
+    "StreamChat",
+    "AgentService",
+    "Conversation",
+}
 
 
 # ANSI colors for terminal output
@@ -60,8 +98,10 @@ class CursorAnalyzer:
     
     def __init__(self):
         self.request_count = 0
+        self.filtered_count = 0
         self.verbose = False
         self.output_file: Optional[str] = None
+        self.filter_mode = "smart"  # smart, ai, all, quiet
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.project_root = os.path.dirname(self.script_dir)
         
@@ -79,6 +119,12 @@ class CursorAnalyzer:
             default=None,
             help="Save traffic to file"
         )
+        loader.add_option(
+            name="cursor_filter",
+            typespec=str,
+            default="smart",
+            help="Filter mode: smart (hide noise), ai (AI only), all (everything), quiet (summary)"
+        )
     
     def configure(self, updates):
         """Handle option changes."""
@@ -90,6 +136,11 @@ class CursorAnalyzer:
                 # Create/clear output file
                 with open(self.output_file, "w") as f:
                     f.write(f"# Cursor Traffic Log - {datetime.now().isoformat()}\n\n")
+        if "cursor_filter" in updates:
+            self.filter_mode = ctx.options.cursor_filter
+            if self.filter_mode not in ("smart", "ai", "all", "quiet"):
+                print(f"{c.YELLOW}Warning: Unknown filter mode '{self.filter_mode}', using 'smart'{c.RESET}")
+                self.filter_mode = "smart"
     
     def running(self):
         """Called when mitmproxy is ready."""
@@ -97,11 +148,50 @@ class CursorAnalyzer:
         print(f"{c.BOLD}{c.CYAN} Cursor Traffic Analyzer - mitmproxy Addon{c.RESET}")
         print(f"{c.CYAN}{'═' * 60}{c.RESET}")
         print(f"\n{c.GREEN}Listening for Cursor traffic...{c.RESET}")
-        print(f"{c.DIM}Configure Cursor with:{c.RESET}")
+        
+        # Show filter mode
+        filter_desc = {
+            "smart": "Hide noise (repo sync, telemetry)",
+            "ai": "AI requests only",
+            "all": "Show everything",
+            "quiet": "Summary only (count requests)",
+        }
+        print(f"{c.CYAN}Filter mode:{c.RESET} {self.filter_mode} - {filter_desc.get(self.filter_mode, '')}")
+        
+        print(f"\n{c.DIM}Configure Cursor with:{c.RESET}")
         print(f"{c.DIM}  export HTTP_PROXY=http://127.0.0.1:{ctx.options.listen_port}{c.RESET}")
         print(f"{c.DIM}  export HTTPS_PROXY=http://127.0.0.1:{ctx.options.listen_port}{c.RESET}")
         print(f"{c.DIM}  export NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-cert.pem{c.RESET}")
         print()
+    
+    def should_show(self, endpoint: str) -> bool:
+        """Check if this endpoint should be displayed based on filter mode."""
+        if self.filter_mode == "all":
+            return True
+        
+        if self.filter_mode == "quiet":
+            return False
+        
+        # Check if it's a noise endpoint
+        is_noise = any(noise in endpoint for noise in NOISE_ENDPOINTS)
+        
+        # Check if it's an AI endpoint
+        is_ai = any(ai in endpoint for ai in AI_ENDPOINTS)
+        
+        if self.filter_mode == "ai":
+            return is_ai
+        
+        # smart mode: show everything except noise
+        if self.filter_mode == "smart":
+            return not is_noise
+        
+        return True
+    
+    def log_filtered_summary(self):
+        """Log summary of filtered requests."""
+        if self.filtered_count > 0:
+            print(f"{c.DIM}  ... ({self.filtered_count} background requests filtered){c.RESET}")
+            self.filtered_count = 0
     
     def is_cursor_api(self, flow: http.HTTPFlow) -> bool:
         """Check if this is a Cursor API request."""
@@ -127,6 +217,21 @@ class CursorAnalyzer:
         
         # Store request ID for matching with response
         flow.metadata["cursor_req_id"] = req_id
+        
+        # Check if this endpoint should be shown
+        endpoint = flow.request.path
+        show = self.should_show(endpoint)
+        flow.metadata["cursor_show"] = show
+        
+        if not show:
+            self.filtered_count += 1
+            # Show periodic summary
+            if self.filtered_count % 10 == 0:
+                self.log_filtered_summary()
+            return
+        
+        # Show any pending filtered summary before this request
+        self.log_filtered_summary()
         
         self.log(f"\n{c.GREEN}{'═' * 60}{c.RESET}")
         self.log(f"{c.BOLD}{c.GREEN} Request #{req_id}{c.RESET}")
@@ -155,6 +260,10 @@ class CursorAnalyzer:
     def response(self, flow: http.HTTPFlow):
         """Handle response."""
         if not self.is_cursor_api(flow):
+            return
+        
+        # Check if request was filtered
+        if not flow.metadata.get("cursor_show", True):
             return
         
         req_id = flow.metadata.get("cursor_req_id", "?")

@@ -191,6 +191,36 @@ mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set cursor_verbose=true
 
 # 4. 保存到文件
 mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set cursor_output=traffic.log
+
+# 5. 过滤模式（减少噪音）
+mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set cursor_filter=smart
+```
+
+### 过滤模式
+
+mitmproxy 插件支持多种过滤模式，减少后台请求的干扰：
+
+| 模式 | 说明 | 适用场景 |
+|------|------|----------|
+| `smart` | 隐藏后台噪音（代码库同步、遥测等）| **推荐**，日常分析 |
+| `ai` | 仅显示 AI 相关请求（模型、对话） | 专注分析 AI 交互 |
+| `all` | 显示所有请求 | 完整调试 |
+| `quiet` | 仅统计请求数量 | 性能监控 |
+
+示例：
+
+```bash
+# 智能过滤（推荐）- 隐藏 SyncMerkleSubtreeV2、traces 等高频后台请求
+mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set cursor_filter=smart
+
+# 仅显示 AI 请求
+mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set cursor_filter=ai
+
+# 组合使用
+mitmdump -s scripts/mitmproxy-addon.py -p 8080 \
+  --set cursor_filter=smart \
+  --set cursor_verbose=true \
+  --set cursor_output=ai-traffic.log
 ```
 
 ### 配置 Cursor
