@@ -6,13 +6,14 @@ This addon integrates with mitmproxy to analyze Cursor API traffic in real-time.
 It automatically detects and parses protobuf messages from Cursor's Agent API.
 
 Usage:
-    mitmdump -s scripts/mitmproxy-addon.py -p 8080
+    # Basic usage (with streaming support for gRPC)
+    mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set stream_large_bodies=1
     
     # With verbose output
-    mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set cursor_verbose=true
+    mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set stream_large_bodies=1 --set cursor_verbose=true
     
     # Save to file
-    mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set cursor_output=traffic.log
+    mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set stream_large_bodies=1 --set cursor_output=traffic.log
     
     # Filter modes (default: smart)
     mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set cursor_filter=smart
@@ -23,7 +24,21 @@ Usage:
       - all:   Show everything (very verbose)
       - quiet: Only count requests, no details
 
-Then configure Cursor to use the proxy:
+For cursor-agent CLI (bypasses HTTP_PROXY, use proxychains):
+    # Install proxychains
+    sudo apt install proxychains4
+    
+    # Create config ~/.proxychains.conf
+    strict_chain
+    proxy_dns
+    localnet 127.0.0.0/255.0.0.0
+    [ProxyList]
+    http 127.0.0.1 8080
+    
+    # Run cursor-agent through proxy
+    proxychains4 -f ~/.proxychains.conf cursor-agent
+
+For Cursor IDE (respects HTTP_PROXY):
     export HTTP_PROXY=http://127.0.0.1:8080
     export HTTPS_PROXY=http://127.0.0.1:8080
     export NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-cert.pem
@@ -64,11 +79,17 @@ NOISE_ENDPOINTS = {
 
 # AI-related endpoints (always interesting)
 AI_ENDPOINTS = {
+    # Model info
     "GetUsableModels",
     "GetDefaultModelForCli",
+    # Agent service (the main AI conversation flow)
+    "AgentService",
+    "RunSSE",           # agent.v1.AgentService/RunSSE - main streaming response
+    "BidiAppend",       # aiserver.v1.BidiService/BidiAppend - bidirectional messages
+    "BidiService",      # The bidi service namespace
+    # Legacy/other AI endpoints
     "NameAgent",
     "StreamChat",
-    "AgentService",
     "Conversation",
 }
 
@@ -100,6 +121,7 @@ class CursorAnalyzer:
         self.request_count = 0
         self.filtered_count = 0
         self.verbose = False
+        self.debug = False  # Log all request URLs for debugging
         self.output_file: Optional[str] = None
         self.filter_mode = "smart"  # smart, ai, all, quiet
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -125,6 +147,12 @@ class CursorAnalyzer:
             default="smart",
             help="Filter mode: smart (hide noise), ai (AI only), all (everything), quiet (summary)"
         )
+        loader.add_option(
+            name="cursor_debug",
+            typespec=bool,
+            default=False,
+            help="Debug mode: log all request URLs (helps diagnose missing requests)"
+        )
     
     def configure(self, updates):
         """Handle option changes."""
@@ -141,6 +169,8 @@ class CursorAnalyzer:
             if self.filter_mode not in ("smart", "ai", "all", "quiet"):
                 print(f"{c.YELLOW}Warning: Unknown filter mode '{self.filter_mode}', using 'smart'{c.RESET}")
                 self.filter_mode = "smart"
+        if "cursor_debug" in updates:
+            self.debug = ctx.options.cursor_debug
     
     def running(self):
         """Called when mitmproxy is ready."""
@@ -158,7 +188,14 @@ class CursorAnalyzer:
         }
         print(f"{c.CYAN}Filter mode:{c.RESET} {self.filter_mode} - {filter_desc.get(self.filter_mode, '')}")
         
-        print(f"\n{c.DIM}Configure Cursor with:{c.RESET}")
+        # Show AI endpoints we're tracking
+        print(f"\n{c.CYAN}AI endpoints tracked:{c.RESET}")
+        print(f"  {c.DIM}AgentService/Run, RunSSE, BidiAppend, StreamChat{c.RESET}")
+        
+        print(f"\n{c.DIM}For cursor-agent (uses gRPC streaming):{c.RESET}")
+        print(f"{c.DIM}  # Option 1: proxychains (recommended for cursor-agent){c.RESET}")
+        print(f"{c.DIM}  proxychains4 -f ~/.proxychains.conf cursor-agent{c.RESET}")
+        print(f"\n{c.DIM}  # Option 2: environment variables (for Cursor IDE){c.RESET}")
         print(f"{c.DIM}  export HTTP_PROXY=http://127.0.0.1:{ctx.options.listen_port}{c.RESET}")
         print(f"{c.DIM}  export HTTPS_PROXY=http://127.0.0.1:{ctx.options.listen_port}{c.RESET}")
         print(f"{c.DIM}  export NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-cert.pem{c.RESET}")
@@ -223,6 +260,17 @@ class CursorAnalyzer:
         show = self.should_show(endpoint)
         flow.metadata["cursor_show"] = show
         
+        # Debug mode: log ALL request URLs
+        if self.debug:
+            print(f"{c.DIM}[DEBUG #{req_id}] {flow.request.method} {endpoint}{c.RESET}")
+        
+        # Debug: always log AI conversation endpoints
+        is_ai_conversation = "RunSSE" in endpoint or "BidiAppend" in endpoint or "BidiService" in endpoint
+        if is_ai_conversation:
+            self.log(f"\n{c.MAGENTA}[AI CONVERSATION DETECTED]{c.RESET}")
+            show = True  # Force show AI conversation
+            flow.metadata["cursor_show"] = True
+        
         if not show:
             self.filtered_count += 1
             # Show periodic summary
@@ -251,11 +299,44 @@ class CursorAnalyzer:
         
         # Analyze request body
         if flow.request.content:
+            # Special handling for AI conversation endpoints
+            if "BidiAppend" in endpoint or "RunSSE" in endpoint:
+                self.log(f"  {c.MAGENTA}[AI Conversation]{c.RESET}")
+            
             self.analyze_message(
                 flow.request.content,
                 direction="request",
                 endpoint=flow.request.path
             )
+    
+    def responseheaders(self, flow: http.HTTPFlow):
+        """Called when response headers are received.
+        
+        Enable streaming for gRPC endpoints to prevent connection issues
+        with long-running streaming responses.
+        """
+        if not self.is_cursor_api(flow):
+            return
+        
+        endpoint = flow.request.path
+        content_type = flow.response.headers.get("content-type", "")
+        
+        # Enable streaming for gRPC and SSE responses
+        # This prevents mitmproxy from buffering the entire response
+        is_streaming = (
+            "grpc" in content_type or 
+            "event-stream" in content_type or
+            "AgentService/Run" in endpoint or
+            "RunSSE" in endpoint or
+            "BidiAppend" in endpoint or
+            "Stream" in endpoint
+        )
+        
+        if is_streaming:
+            # Store for later - we'll handle streaming manually
+            flow.metadata["cursor_streaming"] = True
+            if self.debug:
+                self.log(f"{c.DIM}[DEBUG] Streaming enabled for: {endpoint}{c.RESET}")
     
     def response(self, flow: http.HTTPFlow):
         """Handle response."""
@@ -268,22 +349,29 @@ class CursorAnalyzer:
         
         req_id = flow.metadata.get("cursor_req_id", "?")
         content_type = flow.response.headers.get("content-type", "")
+        endpoint = flow.request.path
+        is_streaming = flow.metadata.get("cursor_streaming", False)
         
         self.log(f"\n{c.BLUE}── Response #{req_id} ──{c.RESET}")
         self.log(f"  {c.CYAN}Status:{c.RESET} {flow.response.status_code}")
         self.log(f"  {c.CYAN}Content-Type:{c.RESET} {content_type}")
+        if is_streaming:
+            self.log(f"  {c.MAGENTA}[Streaming Response]{c.RESET}")
         
         if not flow.response.content:
             return
         
         # Handle SSE responses
         if "event-stream" in content_type:
-            self.analyze_sse(flow.response.content, flow.request.path)
+            self.analyze_sse(flow.response.content, endpoint)
+        # Handle gRPC-Web streaming (RunSSE uses this)
+        elif "grpc-web" in content_type and ("RunSSE" in endpoint or "Stream" in endpoint):
+            self.analyze_grpc_stream(flow.response.content, endpoint)
         else:
             self.analyze_message(
                 flow.response.content,
                 direction="response",
-                endpoint=flow.request.path
+                endpoint=endpoint
             )
     
     def analyze_message(self, data: bytes, direction: str, endpoint: str):
@@ -328,6 +416,72 @@ class CursorAnalyzer:
         except Exception as e:
             self.log(f"  {c.RED}[Analysis error: {e}]{c.RESET}")
             self.show_hex_preview(data)
+    
+    def analyze_grpc_stream(self, data: bytes, endpoint: str):
+        """Analyze gRPC-Web streaming response (used by RunSSE)."""
+        self.log(f"  {c.CYAN}Size:{c.RESET} {len(data)} bytes")
+        self.log(f"  {c.MAGENTA}[gRPC-Web Stream]{c.RESET}")
+        
+        # Parse gRPC-Web frames
+        offset = 0
+        frame_count = 0
+        text_fragments = []
+        
+        while offset + 5 <= len(data):
+            flags = data[offset]
+            length = int.from_bytes(data[offset+1:offset+5], 'big')
+            
+            if offset + 5 + length > len(data):
+                break
+            
+            frame_data = data[offset+5:offset+5+length]
+            offset += 5 + length
+            frame_count += 1
+            
+            # Check for trailer frame (flags & 0x80)
+            if flags & 0x80:
+                try:
+                    trailer = frame_data.decode('utf-8')
+                    self.log(f"  {c.DIM}[Trailer] {trailer[:100]}...{c.RESET}")
+                except:
+                    pass
+                continue
+            
+            # Parse AgentServerMessage
+            try:
+                result = subprocess.run(
+                    [
+                        "bun", "run",
+                        os.path.join(self.project_root, "scripts/cursor-sniffer.ts"),
+                        "--analyze",
+                        "--direction", "response",
+                        "--endpoint", endpoint
+                    ],
+                    input=frame_data.hex().encode(),
+                    capture_output=True,
+                    timeout=3,
+                    cwd=self.project_root
+                )
+                
+                if result.returncode == 0 and result.stdout:
+                    output = result.stdout.decode().strip()
+                    # Extract text content for summary
+                    for line in output.split("\n"):
+                        if "text_delta" in line.lower() or "Text:" in line:
+                            text_fragments.append(line.strip())
+                        elif self.verbose:
+                            self.log(f"      {line}")
+            except:
+                pass
+        
+        self.log(f"  {c.CYAN}Frames:{c.RESET} {frame_count}")
+        
+        # Show text summary
+        if text_fragments:
+            self.log(f"  {c.GREEN}AI Response:{c.RESET}")
+            # Combine and show first part of response
+            combined = " ".join(text_fragments)[:500]
+            self.log(f"    {combined}{'...' if len(combined) >= 500 else ''}")
     
     def analyze_sse(self, data: bytes, endpoint: str):
         """Analyze SSE response."""
@@ -394,8 +548,14 @@ addons = [CursorAnalyzer()]
 
 if __name__ == "__main__":
     print("This script should be run with mitmproxy:")
-    print("  mitmdump -s scripts/mitmproxy-addon.py -p 8080")
+    print("  mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set stream_large_bodies=1")
     print()
-    print("Or with options:")
-    print("  mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set cursor_verbose=true")
+    print("Options:")
+    print("  --set cursor_verbose=true    Show detailed message content")
+    print("  --set cursor_output=file.log Save to file")
+    print("  --set cursor_filter=ai       Only AI requests (smart/ai/all/quiet)")
+    print("  --set cursor_debug=true      Log all URLs for debugging")
+    print()
+    print("For cursor-agent, use proxychains:")
+    print("  proxychains4 -f ~/.proxychains.conf cursor-agent")
     sys.exit(1)

@@ -223,7 +223,7 @@ mitmdump -s scripts/mitmproxy-addon.py -p 8080 \
   --set cursor_output=ai-traffic.log
 ```
 
-### 配置 Cursor
+### 配置 Cursor IDE
 
 ```bash
 # 安装 CA 证书（首次使用）
@@ -239,6 +239,67 @@ export HTTP_PROXY=http://127.0.0.1:8080
 export HTTPS_PROXY=http://127.0.0.1:8080
 export NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-cert.pem
 cursor .
+```
+
+### 配置 cursor-agent CLI（重要！）
+
+`cursor-agent` 命令行工具**不会**遵循 `HTTP_PROXY` 环境变量，需要使用 `proxychains` 强制代理：
+
+#### 方式一：使用辅助脚本（推荐）
+
+```bash
+# 使用我们提供的包装脚本
+./scripts/proxy-cursor-agent.sh --print "你好"
+
+# 或者交互模式
+./scripts/proxy-cursor-agent.sh
+```
+
+#### 方式二：手动配置 proxychains
+
+```bash
+# 1. 安装 proxychains
+sudo apt install proxychains4  # Debian/Ubuntu
+brew install proxychains-ng    # macOS
+
+# 2. 创建配置文件 ~/.proxychains.conf
+cat > ~/.proxychains.conf << 'EOF'
+strict_chain
+proxy_dns
+remote_dns_subnet 224
+
+# 不代理本地连接（重要！）
+localnet 127.0.0.0/255.0.0.0
+localnet ::1/128
+
+[ProxyList]
+http 127.0.0.1 8080
+EOF
+
+# 3. 启动 mitmproxy（启用流式传输支持）
+mitmdump -s scripts/mitmproxy-addon.py -p 8080 --set stream_large_bodies=1
+
+# 4. 运行 cursor-agent（需要设置 CA 证书）
+export NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-cert.pem
+proxychains4 -f ~/.proxychains.conf cursor-agent --print "你好"
+```
+
+#### 常见问题
+
+**Q: 为什么需要 proxychains？**
+
+`cursor-agent` 使用的网络库（可能是 Rust 实现）不遵循标准的 `HTTP_PROXY` 环境变量。`proxychains` 在系统调用层面拦截网络连接，强制所有流量通过代理。
+
+**Q: 连接被拒绝（`<--denied`）怎么办？**
+
+确保 `~/.proxychains.conf` 中包含 `localnet 127.0.0.0/255.0.0.0`，否则 proxychains 会尝试代理本地连接（导致循环）。
+
+**Q: TLS 证书错误怎么办？**
+
+确保设置了 `NODE_EXTRA_CA_CERTS` 环境变量：
+
+```bash
+export NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-cert.pem
 ```
 
 ## 输出格式
