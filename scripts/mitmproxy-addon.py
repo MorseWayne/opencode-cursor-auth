@@ -162,30 +162,16 @@ def parse_proto_fields(data: bytes) -> list:
 
 
 def extract_text_from_agent_message(data: bytes) -> list:
-    """Extract text content from AgentServerMessage protobuf.
-    
-    Structure:
-      AgentServerMessage:
-        field 1: InteractionUpdate
-          field 1: text_delta -> field 1: text
-          field 4: thinking_delta -> field 1: thinking
-          field 8: token_delta -> field 1: text
-    """
+    """Extract text content from AgentServerMessage protobuf (simple version)."""
     texts = []
     
     try:
-        # Parse outer message (AgentServerMessage)
         outer_fields = parse_proto_fields(data)
-        
         for fn, wt, val in outer_fields:
             if fn == 1 and wt == 2 and isinstance(val, bytes):
-                # This is InteractionUpdate
                 update_fields = parse_proto_fields(val)
-                
                 for ufn, uwt, uval in update_fields:
-                    # field 1 = text_delta, field 4 = thinking_delta, field 8 = token_delta
                     if ufn in (1, 4, 8) and uwt == 2 and isinstance(uval, bytes):
-                        # Parse inner message to get actual text
                         inner_fields = parse_proto_fields(uval)
                         for ifn, iwt, ival in inner_fields:
                             if ifn == 1 and iwt == 2 and isinstance(ival, bytes):
@@ -199,6 +185,223 @@ def extract_text_from_agent_message(data: bytes) -> list:
         pass
     
     return texts
+
+
+def parse_agent_message_detailed(data: bytes) -> list:
+    """Parse AgentServerMessage and extract all field types with details.
+    
+    InteractionUpdate fields:
+      field 1: text_delta (TextDeltaUpdate) -> field 1: text
+      field 2: tool_call_started (ToolCallStartedUpdate)
+      field 3: tool_call_completed (ToolCallCompletedUpdate)
+      field 4: thinking_delta (ThinkingDeltaUpdate) -> field 1: thinking
+      field 7: partial_tool_call (PartialToolCallUpdate)
+      field 8: token_delta (TokenDeltaUpdate) -> field 1: text
+      field 13: heartbeat
+      field 14: turn_ended (TurnEndedUpdate)
+    
+    Returns list of dicts with 'type' and 'content' keys.
+    """
+    results = []
+    
+    FIELD_NAMES = {
+        1: "text_delta",
+        2: "tool_call_started",
+        3: "tool_call_completed",
+        4: "thinking_delta",
+        7: "partial_tool_call",
+        8: "token_delta",
+        13: "heartbeat",
+        14: "turn_ended",
+    }
+    
+    try:
+        # Parse outer message (AgentServerMessage)
+        outer_fields = parse_proto_fields(data)
+        
+        for fn, wt, val in outer_fields:
+            if fn == 1 and wt == 2 and isinstance(val, bytes):
+                # This is InteractionUpdate
+                update_fields = parse_proto_fields(val)
+                
+                for ufn, uwt, uval in update_fields:
+                    field_name = FIELD_NAMES.get(ufn, f"field_{ufn}")
+                    
+                    # Text fields (1, 4, 8) - extract text from nested message
+                    if ufn in (1, 4, 8) and uwt == 2 and isinstance(uval, bytes):
+                        inner_fields = parse_proto_fields(uval)
+                        for ifn, iwt, ival in inner_fields:
+                            if ifn == 1 and iwt == 2 and isinstance(ival, bytes):
+                                try:
+                                    text = ival.decode('utf-8')
+                                    if text:
+                                        results.append({
+                                            "type": field_name,
+                                            "content": text
+                                        })
+                                except:
+                                    pass
+                    
+                    # Tool call fields (2, 3) - extract tool info
+                    elif ufn in (2, 3) and uwt == 2 and isinstance(uval, bytes):
+                        tool_info = parse_tool_call_info(uval)
+                        results.append({
+                            "type": field_name,
+                            "content": tool_info
+                        })
+                    
+                    # Partial tool call (7)
+                    elif ufn == 7 and uwt == 2 and isinstance(uval, bytes):
+                        partial_info = parse_partial_tool_call(uval)
+                        results.append({
+                            "type": field_name,
+                            "content": partial_info
+                        })
+                    
+                    # Heartbeat (13) - no content
+                    elif ufn == 13:
+                        results.append({
+                            "type": "heartbeat",
+                            "content": None
+                        })
+                    
+                    # Turn ended (14)
+                    elif ufn == 14:
+                        results.append({
+                            "type": "turn_ended",
+                            "content": None
+                        })
+    except Exception:
+        pass
+    
+    return results
+
+
+# Tool type mapping by field number (from tool-calls.ts)
+TOOL_FIELD_MAP = {
+    1: "bash",
+    3: "delete",
+    4: "glob",
+    5: "grep",
+    8: "read",
+    9: "todowrite",
+    10: "todoread",
+    12: "edit",
+    13: "ls",
+    14: "read_lints",
+    15: "mcp",
+    16: "semantic_search",
+    17: "create_plan",
+    18: "web_search",
+    19: "task",
+    20: "list_mcp_resources",
+    21: "read_mcp_resource",
+    22: "apply_diff",
+    23: "ask_question",
+    24: "webfetch",
+    25: "switch_mode",
+}
+
+
+def parse_tool_call(data: bytes) -> dict:
+    """Parse a ToolCall message. Tool type is determined by field number."""
+    info = {"tool_name": "unknown", "args": {}}
+    try:
+        fields = parse_proto_fields(data)
+        for fn, wt, val in fields:
+            tool_name = TOOL_FIELD_MAP.get(fn)
+            if tool_name and wt == 2 and isinstance(val, bytes):
+                info["tool_name"] = tool_name
+                # Parse tool arguments
+                arg_fields = parse_proto_fields(val)
+                for afn, awt, aval in arg_fields:
+                    if awt == 2 and isinstance(aval, bytes):
+                        try:
+                            # Try to decode nested string (field 1 inside)
+                            nested = parse_proto_fields(aval)
+                            for nfn, nwt, nval in nested:
+                                if nfn == 1 and nwt == 2 and isinstance(nval, bytes):
+                                    info["args"][f"arg_{afn}"] = nval.decode('utf-8')
+                                    break
+                            else:
+                                info["args"][f"arg_{afn}"] = aval.decode('utf-8')
+                        except:
+                            pass
+                    elif awt == 0:
+                        info["args"][f"arg_{afn}"] = aval
+                break
+    except Exception:
+        pass
+    return info
+
+
+def parse_tool_call_info(data: bytes) -> dict:
+    """Parse ToolCallStartedUpdate/ToolCallCompletedUpdate.
+    
+    Structure:
+      field 1: call_id (string)
+      field 2: tool_call (ToolCall message)
+      field 3: model_call_id (string)
+    """
+    info = {}
+    try:
+        fields = parse_proto_fields(data)
+        for fn, wt, val in fields:
+            if fn == 1 and wt == 2 and isinstance(val, bytes):
+                try:
+                    info["call_id"] = val.decode('utf-8')
+                except:
+                    pass
+            elif fn == 2 and wt == 2 and isinstance(val, bytes):
+                # This is the ToolCall message
+                tool_info = parse_tool_call(val)
+                info["tool_name"] = tool_info.get("tool_name", "unknown")
+                info["args"] = tool_info.get("args", {})
+            elif fn == 3 and wt == 2 and isinstance(val, bytes):
+                try:
+                    info["model_call_id"] = val.decode('utf-8')
+                except:
+                    pass
+    except Exception:
+        pass
+    return info
+
+
+def parse_partial_tool_call(data: bytes) -> dict:
+    """Parse PartialToolCallUpdate.
+    
+    Structure:
+      field 1: call_id (string)
+      field 2: tool_call (ToolCall message)
+      field 3: args_text_delta (string) - incremental JSON args
+      field 4: model_call_id (string)
+    """
+    info = {}
+    try:
+        fields = parse_proto_fields(data)
+        for fn, wt, val in fields:
+            if fn == 1 and wt == 2 and isinstance(val, bytes):
+                try:
+                    info["call_id"] = val.decode('utf-8')
+                except:
+                    pass
+            elif fn == 2 and wt == 2 and isinstance(val, bytes):
+                # ToolCall message
+                tool_info = parse_tool_call(val)
+                info["tool_name"] = tool_info.get("tool_name", "unknown")
+            elif fn == 3 and wt == 2 and isinstance(val, bytes):
+                try:
+                    info["args_delta"] = val.decode('utf-8')
+                except:
+                    pass
+            elif fn == 4 and wt == 2 and isinstance(val, bytes):
+                try:
+                    info["model_call_id"] = val.decode('utf-8')
+                except:
+                    pass
+    except Exception:
+        pass
+    return info
 
 
 def timestamp():
@@ -429,6 +632,7 @@ class CursorAnalyzer:
             flow.metadata["cursor_stream_bytes"] = 0
             flow.metadata["cursor_stream_chunks"] = 0
             flow.metadata["cursor_stream_text"] = []
+            flow.metadata["cursor_stream_events"] = []  # Detailed events
             req_id = flow.metadata.get("cursor_req_id", "?")
             
             # Log streaming response header immediately
@@ -442,11 +646,11 @@ class CursorAnalyzer:
             addon = self
             
             def modify_stream(data: bytes) -> bytes:
-                """Stream modifier - parse protobuf and extract AI text."""
+                """Stream modifier - parse protobuf and extract all event types."""
                 flow.metadata["cursor_stream_bytes"] += len(data)
                 flow.metadata["cursor_stream_chunks"] += 1
                 
-                # Parse gRPC frames and extract text from protobuf
+                # Parse gRPC frames and extract detailed events
                 try:
                     offset = 0
                     while offset + 5 <= len(data):
@@ -460,11 +664,14 @@ class CursorAnalyzer:
                         if flags & 0x80:  # Skip trailer
                             continue
                         
-                        # Parse protobuf to extract text
-                        texts = extract_text_from_agent_message(frame_data)
-                        for text in texts:
-                            if text.strip():
-                                flow.metadata["cursor_stream_text"].append(text)
+                        # Parse protobuf to extract detailed events
+                        events = parse_agent_message_detailed(frame_data)
+                        for event in events:
+                            flow.metadata["cursor_stream_events"].append(event)
+                            # Also collect text for summary
+                            if event["type"] in ("text_delta", "thinking_delta", "token_delta"):
+                                if event["content"]:
+                                    flow.metadata["cursor_stream_text"].append(event["content"])
                 except Exception:
                     pass
                 
@@ -493,16 +700,75 @@ class CursorAnalyzer:
             total_bytes = flow.metadata.get("cursor_stream_bytes", 0)
             total_chunks = flow.metadata.get("cursor_stream_chunks", 0)
             text_fragments = flow.metadata.get("cursor_stream_text", [])
+            events = flow.metadata.get("cursor_stream_events", [])
             
             self.log(f"\n{c.BLUE}── Stream Complete #{req_id} ──{c.RESET}")
             self.log(f"  {c.CYAN}Chunks:{c.RESET} {total_chunks}")
             self.log(f"  {c.CYAN}Total Size:{c.RESET} {total_bytes} bytes")
             
+            # Count events by type
+            event_counts = {}
+            for e in events:
+                t = e.get("type", "unknown")
+                event_counts[t] = event_counts.get(t, 0) + 1
+            
+            if event_counts:
+                self.log(f"  {c.CYAN}Events:{c.RESET}")
+                for event_type, count in sorted(event_counts.items()):
+                    self.log(f"    - {event_type}: {count}")
+            
+            # Show tool calls if any
+            tool_events = [e for e in events if e.get("type") in ("tool_call_started", "tool_call_completed", "partial_tool_call")]
+            if tool_events:
+                self.log(f"  {c.YELLOW}Tool Calls:{c.RESET}")
+                for e in tool_events:
+                    content = e.get("content", {})
+                    if isinstance(content, dict):
+                        event_type = e.get("type", "unknown")
+                        tool_name = content.get("tool_name", "unknown")
+                        call_id = content.get("call_id", "")
+                        call_id_short = call_id[:12] + "..." if len(call_id) > 12 else call_id
+                        args = content.get("args", {})
+                        args_delta = content.get("args_delta", "")
+                        
+                        if event_type == "partial_tool_call":
+                            # Show incremental args
+                            if args_delta:
+                                delta_preview = args_delta[:200]
+                                if len(args_delta) > 200:
+                                    delta_preview += "..."
+                                self.log(f"    [partial] {tool_name}: {delta_preview}")
+                            else:
+                                self.log(f"    [partial] {tool_name} ({call_id_short})")
+                        else:
+                            # Show full tool call with args
+                            self.log(f"    [{event_type.replace('tool_call_', '')}] {tool_name}")
+                            if call_id:
+                                self.log(f"      call_id: {call_id_short}")
+                            if args:
+                                for arg_name, arg_val in args.items():
+                                    if isinstance(arg_val, str):
+                                        val_preview = arg_val[:100]
+                                        if len(arg_val) > 100:
+                                            val_preview += "..."
+                                        self.log(f"      {arg_name}: {val_preview}")
+                                    else:
+                                        self.log(f"      {arg_name}: {arg_val}")
+            
+            # Show thinking content if any
+            thinking_events = [e for e in events if e.get("type") == "thinking_delta" and e.get("content")]
+            if thinking_events:
+                self.log(f"  {c.MAGENTA}Thinking:{c.RESET}")
+                thinking_text = ''.join(e.get("content", "") for e in thinking_events)
+                preview = thinking_text[:500]
+                if len(thinking_text) > 500:
+                    preview += "..."
+                self.log(f"    {preview}")
+            
+            # Show AI text response
             if text_fragments:
                 self.log(f"  {c.GREEN}AI Response:{c.RESET}")
-                # Combine and show response preview
-                combined = ' '.join(text_fragments)
-                # Clean up and limit length
+                combined = ''.join(text_fragments)
                 preview = combined[:800]
                 if len(combined) > 800:
                     preview += "..."
