@@ -318,10 +318,114 @@ export function parseAgentServerMessage(data: Uint8Array): ParsedMessage[] {
   return results;
 }
 
+// Check if data looks like a gRPC-Web envelope
+export function hasGrpcWebEnvelope(data: Uint8Array): boolean {
+  if (data.length < 5) return false;
+  
+  const flags = data[0]!;
+  // Valid flags: 0x00 (data frame) or 0x80 (trailer frame)
+  if (flags !== 0x00 && flags !== 0x80) return false;
+  
+  // Read length (big-endian)
+  const length = (data[1]! << 24) | (data[2]! << 16) | (data[3]! << 8) | data[4]!;
+  
+  // Length should match remaining bytes (or be close for trailer frames)
+  return length > 0 && length <= data.length - 5;
+}
+
 // Remove Connect envelope (5 bytes: 1 byte flags + 4 bytes length)
 export function removeEnvelope(data: Uint8Array): Uint8Array {
-  if (data.length < 5) return data;
+  if (!hasGrpcWebEnvelope(data)) return data;
   return data.slice(5);
+}
+
+// Parse UsableModel protobuf message
+export interface UsableModel {
+  modelId?: string;
+  displayModelId?: string;
+  displayName?: string;
+  displayNameShort?: string;
+  aliases?: string[];
+}
+
+export function parseUsableModel(data: Uint8Array): UsableModel {
+  const fields = parseProtoFields(data);
+  const model: UsableModel = {};
+  
+  for (const field of fields) {
+    if (field.wireType === 2 && field.value instanceof Uint8Array) {
+      const str = tryDecodeString(field.value);
+      if (str !== null) {
+        switch (field.fieldNumber) {
+          case 1: model.modelId = str; break;
+          case 2: model.displayModelId = str; break;
+          case 3: model.displayName = str; break;
+          case 4: model.displayNameShort = str; break;
+          case 5:
+            if (!model.aliases) model.aliases = [];
+            model.aliases.push(str);
+            break;
+        }
+      }
+    }
+  }
+  
+  return model;
+}
+
+// Parse GetUsableModelsResponse
+export interface GetUsableModelsResponse {
+  models: UsableModel[];
+}
+
+export function parseGetUsableModelsResponse(data: Uint8Array): GetUsableModelsResponse {
+  const payload = removeEnvelope(data);
+  const fields = parseProtoFields(payload);
+  const response: GetUsableModelsResponse = { models: [] };
+  
+  for (const field of fields) {
+    // Field 1 = models (repeated UsableModel)
+    if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
+      response.models.push(parseUsableModel(field.value));
+    }
+  }
+  
+  return response;
+}
+
+// Parse GetDefaultModelForCliResponse
+export interface GetDefaultModelForCliResponse {
+  model?: UsableModel;
+}
+
+export function parseGetDefaultModelForCliResponse(data: Uint8Array): GetDefaultModelForCliResponse {
+  const payload = removeEnvelope(data);
+  const fields = parseProtoFields(payload);
+  const response: GetDefaultModelForCliResponse = {};
+  
+  for (const field of fields) {
+    // Field 1 = model (UsableModel)
+    if (field.fieldNumber === 1 && field.wireType === 2 && field.value instanceof Uint8Array) {
+      response.model = parseUsableModel(field.value);
+      break;
+    }
+  }
+  
+  return response;
+}
+
+// Format UsableModel for display
+export function formatUsableModel(model: UsableModel, indent = ""): string {
+  const lines: string[] = [];
+  if (model.modelId) lines.push(`${indent}${c.cyan}modelId:${c.reset} ${c.green}${model.modelId}${c.reset}`);
+  if (model.displayName) lines.push(`${indent}${c.cyan}displayName:${c.reset} ${model.displayName}`);
+  if (model.displayModelId && model.displayModelId !== model.modelId) {
+    lines.push(`${indent}${c.cyan}displayModelId:${c.reset} ${model.displayModelId}`);
+  }
+  if (model.aliases && model.aliases.length > 0) {
+    lines.push(`${indent}${c.cyan}aliases:${c.reset} ${model.aliases.join(", ")}`);
+  }
+  return lines.join("\n");
 }
 
 // Detect input format
@@ -462,6 +566,7 @@ export async function analyzeFromStdin(options: {
   direction?: "request" | "response";
   verbose?: boolean;
   showRaw?: boolean;
+  endpoint?: string;
 }): Promise<void> {
   const chunks: Buffer[] = [];
 
@@ -498,25 +603,77 @@ export async function analyzeFromStdin(options: {
     data = input;
   }
 
+  console.log(`${c.cyan}════════════════════════════════════════════════════════════${c.reset}`);
+  console.log(`${c.cyan} Protobuf Analysis${c.reset}`);
+  console.log(`${c.cyan}════════════════════════════════════════════════════════════${c.reset}`);
+  
+  // Check for gRPC-Web envelope
+  const hasEnvelope = hasGrpcWebEnvelope(data);
   const payload = removeEnvelope(data);
   
-  console.log(`${c.cyan}Analyzing ${data.length} bytes...${c.reset}\n`);
+  console.log(`${c.dim}Input: ${data.length} bytes${hasEnvelope ? `, Payload: ${payload.length} bytes (envelope removed)` : " (no envelope)"}${c.reset}\n`);
   
-  if (options.direction === "response") {
-    const messages = parseAgentServerMessage(payload);
-    for (const msg of messages) {
-      console.log(`${c.cyan}${msg.type}:${c.reset} ${msg.summary}`);
-      if (options.verbose && Object.keys(msg.details).length > 0) {
-        console.log(`  ${c.dim}${JSON.stringify(msg.details)}${c.reset}`);
+  let parsed = false;
+  
+  // Try endpoint-specific parsing first
+  if (options.direction === "response" && options.endpoint) {
+    if (options.endpoint.includes("GetUsableModels")) {
+      const response = parseGetUsableModelsResponse(data);
+      if (response.models.length > 0) {
+        parsed = true;
+        console.log(`${c.green}GetUsableModelsResponse:${c.reset} ${response.models.length} models\n`);
+        for (let i = 0; i < response.models.length; i++) {
+          const model = response.models[i]!;
+          console.log(`${c.yellow}[${i + 1}]${c.reset} ${c.green}${model.modelId || "unknown"}${c.reset}`);
+          if (model.displayName) console.log(`    ${c.dim}Display: ${model.displayName}${c.reset}`);
+          if (model.aliases && model.aliases.length > 0) {
+            console.log(`    ${c.dim}Aliases: ${model.aliases.join(", ")}${c.reset}`);
+          }
+        }
+      }
+    } else if (options.endpoint.includes("GetDefaultModelForCli")) {
+      const response = parseGetDefaultModelForCliResponse(data);
+      if (response.model) {
+        parsed = true;
+        console.log(`${c.green}GetDefaultModelForCliResponse:${c.reset}`);
+        console.log(formatUsableModel(response.model, "  "));
       }
     }
-  } else if (options.direction === "request") {
-    const msg = parseAgentClientMessage(payload);
-    console.log(`${c.cyan}${msg.type}:${c.reset} ${msg.summary}`);
-    if (options.verbose) {
-      console.log(`${c.dim}${JSON.stringify(msg.details, null, 2)}${c.reset}`);
+  }
+  
+  // Try generic message parsing
+  if (!parsed && options.direction === "response") {
+    const messages = parseAgentServerMessage(payload);
+    if (messages.length > 0) {
+      parsed = true;
+      console.log(`${c.green}Parsed as AgentServerMessage:${c.reset}`);
+      for (const msg of messages) {
+        console.log(`  ${c.cyan}${msg.type}:${c.reset} ${msg.summary}`);
+        if (options.verbose && Object.keys(msg.details).length > 0) {
+          console.log(`    ${c.dim}${JSON.stringify(msg.details)}${c.reset}`);
+        }
+      }
     }
-  } else {
+  } else if (!parsed && options.direction === "request") {
+    const msg = parseAgentClientMessage(payload);
+    if (msg.summary) {
+      parsed = true;
+      console.log(`${c.green}Parsed as AgentClientMessage:${c.reset}`);
+      console.log(`  ${c.cyan}Type:${c.reset} ${msg.summary}`);
+      if (options.verbose && Object.keys(msg.details).length > 0) {
+        console.log(`  ${c.cyan}Details:${c.reset} ${JSON.stringify(msg.details, null, 2)}`);
+      }
+    }
+  }
+  
+  // Fallback to generic protobuf field analysis
+  if (!parsed) {
+    console.log(`${c.yellow}Raw protobuf fields:${c.reset}`);
     console.log(analyzeProtoFields(payload, 0, options.showRaw));
+  }
+  
+  if (options.showRaw) {
+    console.log(`\n${c.dim}Raw hex dump:${c.reset}`);
+    console.log(hexDump(payload));
   }
 }

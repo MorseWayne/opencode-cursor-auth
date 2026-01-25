@@ -70,6 +70,7 @@ let withCursor = false;
 let enableTls = false;
 let enableUi = false;
 let direction: "request" | "response" | null = null;
+let endpoint: string | null = null;
 
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
@@ -92,6 +93,8 @@ for (let i = 0; i < args.length; i++) {
     formatOverride = args[++i] as DataFormat;
   } else if (arg === "--direction" && args[i + 1]) {
     direction = args[++i] as "request" | "response";
+  } else if (arg === "--endpoint" && args[i + 1]) {
+    endpoint = args[++i]!;
   } else if (arg === "--with-cursor") {
     withCursor = true;
   } else if (arg === "--tls") {
@@ -126,6 +129,7 @@ ${c.cyan}Options:${c.reset}
   --raw, -r          Show raw hex data
   --format <fmt>     Force format: hex|base64|sse|binary
   --direction <dir>  Hint: request or response
+  --endpoint <ep>    API endpoint for specific parsing
   --help, -h         Show this help
 
 ${c.cyan}Example:${c.reset}
@@ -694,21 +698,8 @@ ${c.cyan}Example:${c.reset}
   prompt();
 }
 
-// Analyze from stdin
-async function analyzeFromStdin(isBase64: boolean): Promise<void> {
-  const chunks: Buffer[] = [];
-
-  for await (const chunk of process.stdin) {
-    chunks.push(Buffer.from(chunk));
-  }
-
-  const input = Buffer.concat(chunks).toString().trim();
-  const data = isBase64 ? Buffer.from(input, "base64") : Buffer.from(input, "hex");
-
-  logSection("Protobuf Analysis", c.cyan);
-  console.log(`${c.dim}Input: ${data.length} bytes${c.reset}\n`);
-  console.log(analyzeProtoFields(data, 0));
-}
+// Note: analyzeFromStdin is imported from ./sniffer/analyzer
+// It properly handles gRPC-Web envelope removal and message parsing
 
 // HTTP Proxy server
 async function startProxyServer(): Promise<void> {
@@ -981,6 +972,7 @@ async function main(): Promise<void> {
       direction: direction || undefined,
       verbose,
       showRaw,
+      endpoint: endpoint || undefined,
     });
     return;
   }
@@ -991,6 +983,7 @@ async function main(): Promise<void> {
       direction: direction || undefined,
       verbose,
       showRaw,
+      endpoint: endpoint || undefined,
     });
     return;
   }

@@ -186,14 +186,16 @@ class CursorAnalyzer:
         
         # Try to use bun script for analysis
         try:
+            cmd = [
+                "bun", "run", 
+                os.path.join(self.project_root, "scripts/cursor-sniffer.ts"),
+                "--analyze",
+                "--direction", direction,
+                "--endpoint", endpoint,
+                "--verbose" if self.verbose else "--raw"
+            ]
             result = subprocess.run(
-                [
-                    "bun", "run", 
-                    os.path.join(self.project_root, "scripts/cursor-sniffer.ts"),
-                    "--analyze",
-                    "--direction", direction,
-                    "--verbose" if self.verbose else "--raw"
-                ],
+                cmd,
                 input=data.hex().encode(),
                 capture_output=True,
                 timeout=5,
