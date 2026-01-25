@@ -247,7 +247,8 @@ def parse_agent_message_detailed(data: bytes) -> list:
                         tool_info = parse_tool_call_info(uval)
                         results.append({
                             "type": field_name,
-                            "content": tool_info
+                            "content": tool_info,
+                            "raw_hex": uval.hex()  # Raw bytes for verification
                         })
                     
                     # Partial tool call (7)
@@ -255,7 +256,8 @@ def parse_agent_message_detailed(data: bytes) -> list:
                         partial_info = parse_partial_tool_call(uval)
                         results.append({
                             "type": field_name,
-                            "content": partial_info
+                            "content": partial_info,
+                            "raw_hex": uval.hex()  # Raw bytes for verification
                         })
                     
                     # Heartbeat (13) - no content
@@ -278,6 +280,7 @@ def parse_agent_message_detailed(data: bytes) -> list:
 
 
 # Tool type mapping by field number (from tool-calls.ts)
+# Names should match TypeScript TOOL_FIELD_MAP exactly
 TOOL_FIELD_MAP = {
     1: "bash",
     3: "delete",
@@ -287,7 +290,7 @@ TOOL_FIELD_MAP = {
     9: "todowrite",
     10: "todoread",
     12: "edit",
-    13: "ls",
+    13: "list",  # Changed from "ls" to match TypeScript
     14: "read_lints",
     15: "mcp",
     16: "semantic_search",
@@ -300,6 +303,42 @@ TOOL_FIELD_MAP = {
     23: "ask_question",
     24: "webfetch",
     25: "switch_mode",
+    26: "exa_search",
+    27: "exa_fetch",
+    28: "generate_image",
+    29: "record_screen",
+    30: "computer_use",
+}
+
+# Tool argument schemas - maps tool type to {field_number: arg_name}
+# Should match TypeScript TOOL_ARG_SCHEMA exactly
+TOOL_ARG_SCHEMA = {
+    "bash": {1: "command", 2: "description", 3: "working_directory"},
+    "delete": {1: "filePath"},
+    "glob": {1: "pattern", 2: "path"},
+    "grep": {1: "pattern", 2: "path", 3: "include"},
+    "read": {1: "filePath", 2: "offset", 3: "limit"},
+    "todowrite": {1: "todos"},
+    "todoread": {},
+    "edit": {1: "filePath", 2: "oldString", 3: "newString", 4: "replaceAll"},
+    "list": {1: "path", 2: "ignore"},
+    "read_lints": {},
+    "mcp": {1: "provider_identifier", 2: "tool_name", 3: "tool_call_id", 4: "args"},
+    "semantic_search": {1: "query", 2: "path"},
+    "create_plan": {1: "plan"},
+    "web_search": {1: "query"},
+    "task": {1: "description", 2: "prompt", 3: "subagent_type"},
+    "list_mcp_resources": {1: "provider_identifier"},
+    "read_mcp_resource": {1: "provider_identifier", 2: "uri"},
+    "apply_diff": {1: "filePath", 2: "diff"},
+    "ask_question": {1: "question"},
+    "webfetch": {1: "url", 2: "format"},
+    "switch_mode": {1: "mode"},
+    "exa_search": {1: "query"},
+    "exa_fetch": {1: "url"},
+    "generate_image": {1: "prompt"},
+    "record_screen": {1: "duration"},
+    "computer_use": {1: "action", 2: "text", 3: "coordinate"},
 }
 
 
@@ -312,23 +351,31 @@ def parse_tool_call(data: bytes) -> dict:
             tool_name = TOOL_FIELD_MAP.get(fn)
             if tool_name and wt == 2 and isinstance(val, bytes):
                 info["tool_name"] = tool_name
+                # Get argument schema for this tool
+                arg_schema = TOOL_ARG_SCHEMA.get(tool_name, {})
                 # Parse tool arguments
                 arg_fields = parse_proto_fields(val)
                 for afn, awt, aval in arg_fields:
+                    # Get the proper argument name from schema
+                    arg_name = arg_schema.get(afn, f"field_{afn}")
                     if awt == 2 and isinstance(aval, bytes):
                         try:
                             # Try to decode nested string (field 1 inside)
                             nested = parse_proto_fields(aval)
                             for nfn, nwt, nval in nested:
                                 if nfn == 1 and nwt == 2 and isinstance(nval, bytes):
-                                    info["args"][f"arg_{afn}"] = nval.decode('utf-8')
+                                    info["args"][arg_name] = nval.decode('utf-8')
                                     break
                             else:
-                                info["args"][f"arg_{afn}"] = aval.decode('utf-8')
+                                info["args"][arg_name] = aval.decode('utf-8')
                         except:
                             pass
                     elif awt == 0:
-                        info["args"][f"arg_{afn}"] = aval
+                        # Handle boolean/integer values
+                        if arg_name == "replaceAll":
+                            info["args"][arg_name] = (aval == 1)
+                        else:
+                            info["args"][arg_name] = aval
                 break
     except Exception:
         pass
@@ -420,6 +467,8 @@ class CursorAnalyzer:
         self.filter_mode = "smart"  # smart, ai, all, quiet
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.project_root = os.path.dirname(self.script_dir)
+        self.toolcall_dump_file: Optional[str] = None
+        self.toolcall_dump_data: List[dict] = []  # Buffer for tool call data
         
     def load(self, loader: Loader):
         """Register addon options."""
@@ -447,6 +496,12 @@ class CursorAnalyzer:
             default=False,
             help="Debug mode: log all request URLs (helps diagnose missing requests)"
         )
+        loader.add_option(
+            name="cursor_dump_toolcalls",
+            typespec=Optional[str],
+            default=None,
+            help="Save raw tool call data to JSON file for verification"
+        )
     
     def configure(self, updates):
         """Handle option changes."""
@@ -465,6 +520,11 @@ class CursorAnalyzer:
                 self.filter_mode = "smart"
         if "cursor_debug" in updates:
             self.debug = ctx.options.cursor_debug
+        if "cursor_dump_toolcalls" in updates:
+            self.toolcall_dump_file = ctx.options.cursor_dump_toolcalls
+            if self.toolcall_dump_file:
+                self.toolcall_dump_data = []
+                print(f"{c.CYAN}Tool call dump enabled: {self.toolcall_dump_file}{c.RESET}")
     
     def running(self):
         """Called when mitmproxy is ready."""
@@ -633,6 +693,7 @@ class CursorAnalyzer:
             flow.metadata["cursor_stream_chunks"] = 0
             flow.metadata["cursor_stream_text"] = []
             flow.metadata["cursor_stream_events"] = []  # Detailed events
+            flow.metadata["cursor_raw_toolcalls"] = []  # Raw tool call data for verification
             req_id = flow.metadata.get("cursor_req_id", "?")
             
             # Log streaming response header immediately
@@ -773,6 +834,29 @@ class CursorAnalyzer:
                 if len(combined) > 800:
                     preview += "..."
                 self.log(f"    {preview}")
+            
+            # Save tool call data for verification if enabled
+            if self.toolcall_dump_file and tool_events:
+                for e in tool_events:
+                    raw_hex = e.get("raw_hex")
+                    if raw_hex:
+                        dump_entry = {
+                            "timestamp": timestamp(),
+                            "request_id": str(req_id),
+                            "endpoint": endpoint,
+                            "event_type": e.get("type"),
+                            "raw_hex": raw_hex,
+                            "python_parsed": e.get("content", {})
+                        }
+                        self.toolcall_dump_data.append(dump_entry)
+                
+                # Write to file
+                try:
+                    with open(self.toolcall_dump_file, "w") as f:
+                        json.dump(self.toolcall_dump_data, f, indent=2, ensure_ascii=False)
+                    self.log(f"  {c.DIM}[Saved {len(tool_events)} tool calls to {self.toolcall_dump_file}]{c.RESET}")
+                except Exception as ex:
+                    self.log(f"  {c.RED}[Error saving tool calls: {ex}]{c.RESET}")
             
             self.log(f"  {c.GREEN}[Stream Finished]{c.RESET}")
             return
